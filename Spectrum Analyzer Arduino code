@@ -1,0 +1,163 @@
+/*  Spectrum Analyzer using Rainbowduino and 8x8 RGB LED Array
+
+Analog signal is captured at 19.2 KHz, 64 spectrum bands each 300Hz
+
+Original Fixed point FFT library is from ELM Chan, http://elm-chan.org/works/akilcd/report_e.html
+Ported to the library and demo codes are from AMurchick http://arduino.cc/forum/index.php/topic,37751.0.html
+*/
+
+#include <stdint.h>  //standard data types
+#include <ffft.h>    // 
+#include <Rainbowduino.h>
+
+#define  IR_AUDIO  0 // ADC channel to capture
+
+volatile  byte  position = 0;
+volatile  long  zero = -512;    // DC offset to A/D readings
+
+int16_t capture[FFT_N];  	// Wave captureing buffer
+complex_t bfly_buff[FFT_N];	// FFT buffer
+uint16_t spektrum[FFT_N/2];	// Spectrum output buffer
+uint16_t output[8];             // LED output array
+
+byte logLed;
+//long color[8] = {0x0000FF, 0x0000FF, 0x0000FF, 0x0000FF, 0x0000FF, 0x0000FF, 0x7F7F00, 0xFF0000}; //Blue-Yellow-Red
+long color[8] = {0xFF0000, 0xFF7F00, 0xFFFF00, 0x7FFF00, 0x00FF00, 0x00FF7F, 0x007FFF, 0x0000FF}; //Rainbow Red to Blue
+//long color[8] = {0x0000FF, 0x0000FF, 0x007FFF, 0x00FFFF, 0x00FF7F, 0x7FFF00, 0xFF0000, 0xFFFFFF}; //Rainbow Blue to Red
+unsigned int spectrumValue;
+
+void setup()
+{
+  Rb.init();
+  adcInit();
+}
+
+void loop()
+{
+  if (position == FFT_N)
+  {
+    fft_input(capture, bfly_buff);
+    fft_execute(bfly_buff);
+    fft_output(bfly_buff, spektrum);
+
+    outputLED();  // convert the 64 spectrum bins into 8 LED columns
+    
+    for (byte i = 0; i < 8; i++){   // was (byte i = 0; i < 64; i++)
+    
+      logLed = logPeak(output[i]);  //scale into range for the display
+      
+      Rb.drawVerticalLine(i, 0, 8, 0x000000); 
+//      Rb.setPixelXY(i, logLed-1, color[logLed-1]); 
+//     Rb.drawVerticalLine(i, 0, logLed, color[logLed-1]); 
+      Rb.drawVerticalLine(i, 0, logLed, color[i]); // logLed
+    }
+   position = 0;
+  }
+}
+
+
+// free running ADC fills capture buffer
+ISR(ADC_vect)
+{
+  if (position >= FFT_N)
+    return;
+  
+  capture[position] = ADC - 512;    // subtract DC offset
+//  if (capture[position] == -1 || capture[position] == 1)  //not sure why this is here
+//    capture[position] = 0;
+
+  position++;
+}
+
+void adcInit(){
+  //  REFS0 : VCC use as a ref, IR_AUDIO : channel selection, ADEN : ADC Enable, ADSC : ADC Start, ADATE : ADC Auto Trigger Enable, ADIE : ADC Interrupt Enable,  ADPS : ADC Prescaler
+  // free running ADC mode, f = ( 16MHz / prescaler ) / 13 cycles per conversion 
+  ADMUX = _BV(REFS0) | IR_AUDIO; // | _BV(ADLAR); 
+  ADCSRA = _BV(ADSC) | _BV(ADEN) | _BV(ADATE) | _BV(ADIE) | _BV(ADPS2) | _BV(ADPS1); //prescaler 64 : 19231 Hz - 300Hz per 64 divisions
+//  ADCSRA = _BV(ADSC) | _BV(ADEN) | _BV(ADATE) | _BV(ADIE) | _BV(ADPS2) | _BV(ADPS1) | _BV(ADPS0); // prescaler 128 : 9615 Hz - 150 Hz per 64 divisions, better for most music
+  sei();
+}
+
+
+// logPeak: returns an interger value of 0 to 8 based on the input value in the range of 0 to 512
+//   intended to map a peak reading from analog audio to 1 of 8 LEDS in a log scale
+//   log values for a 0 to 512 peak reading for 8 LEDS: 7, 10, 14, 24, 44, 88, 176, 351
+//    formula used = 3.14 * LOG(input - 5)
+//    (the -5 is to deal with the ever present noise from the A/D readings)
+byte logPeak(int peak){
+  if (peak > 123){      //240
+    return 8;
+  }
+  else if(peak > 72){  //120
+    return 7;
+  }
+  else if(peak > 42){  //60
+    return 6;
+  }
+  else if(peak > 25){  //30
+    return 5;
+  }
+  else if(peak > 14){  //15
+    return 4;
+  }
+  else if(peak > 8){  //9
+    return 3;
+  }
+  else if(peak > 5){  //5
+    return 2;
+  }
+  else if(peak > 3){  //3
+    return 1;
+  }
+  return 0;
+}
+
+
+/* outputLED: collapse the 64 spectral bins into rough log groupings
+64	0	0	0
+125	1	1	1
+250	2	2	2
+500	3	3	5
+1000	4	6	10
+2000	5	11	20
+4000	6	21	39
+8000	7	40	63 */
+
+// Averages the last reading with the new reading
+void outputLED(){
+  int sum, j;
+  
+  output[0] = (output[0] + spektrum[0])/2;
+  output[1] = (output[1] + spektrum[1])/2;
+  output[2] = (output[2] + spektrum[2])/2;
+  
+  sum = 0; // initialize sum for LED 3
+  for (int j=3; j < 6; j++){
+    sum = sum + spektrum[j];
+  }
+  output[3] = (output[3] + (sum / 2))/2;
+
+  sum = 0; // initialize sum for LED 4
+  for (j=6; j < 11; j++){
+    sum = sum + spektrum[j];
+  }
+  output[4] = (output[4] + (sum / 3))/2; //5
+
+  sum = 0; // initialize sum for LED 5
+  for (j=11; j < 21; j++){
+    sum = sum + spektrum[j];
+  }
+  output[5] = (output[5] + (sum / 4))/2;  //10
+
+  sum = 0; // initialize sum for LED 6
+  for (j=21; j < 40; j++){
+    sum = sum + spektrum[j];
+  }
+  output[6] = (output[6] + (sum / 5))/2;  //19
+
+  sum = 0; // initialize sum for LED 7
+  for (j=40; j < 64; j++){
+    sum = sum + spektrum[j];
+  }
+  output[7] = (output[7] + (sum / 10))/2;  //23
+} 
